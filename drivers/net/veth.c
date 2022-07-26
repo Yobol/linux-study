@@ -316,17 +316,34 @@ static bool veth_skb_is_eligible_for_gro(const struct net_device *dev,
 		 rcv->features & (NETIF_F_GRO_FRAGLIST | NETIF_F_GRO_UDP_FWD));
 }
 
+// <yobol> xmit = (addr.) transmit
+// 用于将 RX 端接收的数据从 TX 端发送出去，并且不会修改任何内容
 static netdev_tx_t veth_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct veth_priv *rcv_priv, *priv = netdev_priv(dev);
 	struct veth_rq *rq = NULL;
 	struct net_device *rcv;
 	int length = skb->len;
+	// <yobol> https://blog.csdn.net/zhangskd/article/details/21627963
+	// NAPI 即 New API，是综合了中断和轮询的技术。
+	// 中断的优点是响应及时，如果数据量较小，则不会占用太多的 CPU 时间；
+	//       缺点是数据量较大时，会产生过多中断，而每次中断都会消耗不少 CPU 时间。
+	// 轮询的优点是每次轮询不需要消耗过多的 CPU 时间；
+	//       缺点是即使只接收很少数据或不接受数据时，也要占用 CPU。
+	// NAPI 结合了两者，数据量较少时采用中断，数据量较高时采用轮询。
+	// 默认是中断方式，当有数据量到达时，会触发中断处理函数执行，中断处理函数关闭中断开始处理。
+	// 如果此时有数据到达，就不需要再次触发中断，而在中断处理函数中使用轮询方式处理数据，直到没有新数据时打开中断。
 	bool use_napi = false;
 	int rxq;
 
+	// <yobol> https://www.cnblogs.com/scottieyuyang/p/5764459.html
+	// RCU，即 Read, Copy Update，是 Linux 内核针对读多写少的共享数据的同步机制。
+	// 不对读取进行任何限制，但是更新数据时，需要先拷贝一份部分，在副本上完成修改后再一次性地替换原数据。
 	rcu_read_lock();
-	rcv = rcu_dereference(priv->peer);
+	rcv = rcu_dereference(priv->peer); // <yobol> 获取 sender（dev） 的 peer，即 receiver（rcv）
+	// <yobol> https://zhuanlan.zhihu.com/p/357434227
+	// likely & unlikely 用于提升分支预测准确率。
+	// 用 likely 修饰的条件标识更有可能被满足，而用 unlikely 修饰的条件表示不太可能被满足。
 	if (unlikely(!rcv) || !pskb_may_pull(skb, ETH_HLEN)) {
 		kfree_skb(skb);
 		goto drop;
@@ -346,9 +363,10 @@ static netdev_tx_t veth_xmit(struct sk_buff *skb, struct net_device *dev)
 	}
 
 	skb_tx_timestamp(skb);
+	// <yobol> 将 skb 中的接收的数据转发给 rcv（dev's peer）
 	if (likely(veth_forward_skb(rcv, skb, rq, use_napi) == NET_RX_SUCCESS)) {
 		if (!use_napi)
-			dev_lstats_add(dev, length);
+			dev_lstats_add(dev, length); // <yobol> 更新 dev 发送的字节数、数据包数等统计数据
 	} else {
 drop:
 		atomic64_inc(&priv->dropped);
